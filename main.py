@@ -1,90 +1,100 @@
-"""MESBAHI — عداد تسبيح ذكي من الكاميرا (قبضة اليد) مع شرح قابل للتفسير (XAI).
+"""MESBAHI — عداد تسبيح ذكي من الكاميرا (قبضة اليد) مع شرح SHAP.
 
 Live demo:
     python main.py                  # use your webcam
     python main.py --simulate       # scripted hand, no camera required
     python main.py --camera 1       # pick another camera index
 
-Controls (focus window):
-    Q / ESC   quit       R   reset session   S   save session to CSV
+Controls:
+    Q / ESC  exit    R  reset session    S  save session CSV
 """
 
 from __future__ import annotations
+import argparse, csv, datetime as dt, threading, time, sys
 
-import argparse
-import csv
-import datetime as dt
-import threading
-import time
-
-# Windows console: speak Arabic properly
-import sys
 if sys.platform == "win32" and sys.stdout.encoding:
     sys.stdout.reconfigure(encoding="utf-8")
 
-import cv2
-import mediapipe as mp
-import numpy as np
+import cv2, mediapipe as mp, numpy as np
 from PIL import Image, ImageDraw, ImageFont
-
 import arabic_reshaper
 from bidi.algorithm import get_display
-
 import core
 
-AR_NAMES = ["إبهام", "سبابة", "وسطى", "بنصر", "خنصر"]
-BARFC = (32, 74, 135)   # deep blue
-BARO  = (170, 20, 20)   # crimson
+# ─── Palette ─────────────────────────────────────────────────────
+BG        = (32, 36, 44)
+PANEL     = (40, 46, 58)
+TEXT_W    = (240, 242, 248)
+TEXT_M    = (160, 170, 190)
+TEXT_L    = (100, 110, 130)
+ACCENT    = (60, 180, 160)       # teal
+ACCENT2   = (80, 140, 220)       # blue
+GREEN_OK  = (80, 200, 130)
+GOLD      = (240, 200, 80)
+WARM_ON   = (80, 140, 235)
+WARM_OFF  = (70, 78, 95)
+SHAP_POS  = (220, 90, 70)
+SHAP_NEG  = (70, 120, 200)
+GAUGE_OFF = (50, 60, 75)
+BAR_BG    = (55, 62, 78)
+
 FONT_PATH = r"C:\Windows\Fonts\segoeui.ttf"
+AR_NAMES  = ["الإبهام", "السبابة", "الوسطى", "البنصر", "الخنصر"]
 
-# --------------------------------------------------------------------- Arabic
+# ─── Font cache ──────────────────────────────────────────────────
 _FONTS: dict[int, ImageFont.FreeTypeFont] = {}
-
 
 def _f(sz: int) -> ImageFont.FreeTypeFont:
     if sz not in _FONTS:
         _FONTS[sz] = ImageFont.truetype(FONT_PATH, sz)
     return _FONTS[sz]
 
-
 def ar(text: str) -> str:
     return get_display(arabic_reshaper.reshape(text))
 
-
+# ─── PIL helpers ─────────────────────────────────────────────────
 def begin_layer(frame_bgr):
-    """Convert once per frame to a PIL draw surface (fonts cached)."""
     return Image.fromarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
 
-
-def layer_text(pil, x, y, text, fsize=34, color=(235, 235, 235)):
+def layer_text(pil, x, y, text, size=34, color=TEXT_W):
     d = ImageDraw.Draw(pil)
-    d.text((x, y), ar(text), font=_f(fsize), fill=color)
+    d.text((x, y), ar(text), font=_f(size), fill=color)
     return pil
-
 
 def end_layer(pil):
     return cv2.cvtColor(np.asarray(pil), cv2.COLOR_RGB2BGR)
 
-
+# ─── Gauge ───────────────────────────────────────────────────────
 def draw_gauge(frame, cx, cy, value, color):
-    """33-bead tasbih gauge: value ∈ [0, 33]."""
-    value %= 33
-    cv2.putText(frame, f"{value}/33", (cx - 40, cy - 26),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.75, (200, 210, 235), 2)
-    cv2.circle(frame, (cx, cy), 110, (70, 90, 110), 4)
+    val33 = value % 33
+    # ring
+    cv2.circle(frame, (cx, cy), 100, GAUGE_OFF, 3, cv2.LINE_AA)
     for b in range(33):
         a = -90 + b * 360 / 33
-        x = int(cx + 96 * np.cos(np.radians(a)))
-        y = int(cy + 96 * np.sin(np.radians(a)))
-        cv2.circle(frame, (x, y), 6, color if b < value else (70, 90, 110), -1)
+        x = int(cx + 86 * np.cos(np.radians(a)))
+        y = int(cy + 86 * np.sin(np.radians(a)))
+        filled = b < val33
+        col = color if filled else GAUGE_OFF
+        cv2.circle(frame, (x, y), 5 if not filled else 7, col, -1, cv2.LINE_AA)
+    # center text
+    cv2.putText(frame, f"{val33}", (cx - 16, cy + 8),
+                cv2.FONT_HERSHEY_DUPLEX, 0.9, TEXT_W, 2, cv2.LINE_AA)
     return frame
 
+# ─── Progress bar ────────────────────────────────────────────────
+def draw_bar(frame, x, y, w, h, pct, color):
+    cv2.rectangle(frame, (x, y), (x + w, y + h), BAR_BG, -1)
+    if pct > 0:
+        cv2.rectangle(frame, (x, y), (x + int(w * min(pct, 1.0)), y + h),
+                      color, -1)
+    return frame
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description="MESBAHI — camera istighfar counter with XAI")
+# ─── Main ────────────────────────────────────────────────────────
+def main():
+    ap = argparse.ArgumentParser(description="MESBAHI fist istighfar counter")
     ap.add_argument("--camera", type=int, default=0)
-    ap.add_argument("--simulate", action="store_true", help="scripted hand, no camera")
-    ap.add_argument("--goal", type=int, default=100, help="target istighfar (default 100)")
+    ap.add_argument("--simulate", action="store_true")
+    ap.add_argument("--goal", type=int, default=100)
     args = ap.parse_args()
     GOAL = args.goal
 
@@ -100,12 +110,11 @@ def main() -> None:
     cap = cv2.VideoCapture(args.camera) if not sim else None
     sim_t0 = time.time()
 
-    current = 0
-    last_change, last_total = time.time(), 0
+    last_change = time.time()
+    last_total = 0
     lost_frames = 0
     goal_celebrated = False
     session_rows, started = [], dt.datetime.now()
-    mask_seq = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0]
     seq_i = 0
 
     def save_csv():
@@ -117,19 +126,19 @@ def main() -> None:
             w.writerows(session_rows)
         print(f"[جلسة محفوظة] → {fn}")
 
-    print(ar("مِسباح — اضغط Q للخروج، R لإعادة العدّ، S لحفظ الجلسة"))
+    print(ar("مِسباح — Q خروج · R تصفير · S حفظ"))
+
     while True:
-        # ---------------- acquire frame + landmarks
+        # ── frame + landmarks ─────────────────────────────────
         if sim:
             seq_i += 1
             t = time.time() - sim_t0
             mask = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0][int(t) % 11]
             lm = core.synthetic_hand(mask, seed=int(t * 10))
-            aspect = 1.0
-            feats = core.finger_features(lm, aspect)
+            feats = core.finger_features(lm, 1.0)
             has_hand = True
             frame = np.zeros((480, 640, 3), np.uint8)
-            frame[:] = (30, 36, 48)
+            frame[:] = BG
             h, w = 480, 640
         else:
             ok, frame = cap.read()
@@ -140,82 +149,130 @@ def main() -> None:
             res = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
             has_hand = bool(res.multi_hand_landmarks)
             if has_hand:
-                lm = np.array([[p.x, p.y, p.z] for p in
-                               res.multi_hand_landmarks[0].landmark])
-                aspect = w / h                    # correct mediapipe's axis split
-                feats = core.finger_features(lm, aspect)
+                lm = np.array([[p.x, p.y, p.z]
+                               for p in res.multi_hand_landmarks[0].landmark])
+                feats = core.finger_features(lm, w / h)
             else:
                 feats = None
 
-        # ---------------- count logic: accurate per-finger state machine
+        # ── fist counter ──────────────────────────────────────
         if has_hand:
             lost_frames = 0
             current = counter.update(feats)
         else:
             lost_frames += 1
-            if lost_frames >= 5:            # hand gone ~0.5s -> full reset
+            if lost_frames >= 5:
                 counter.reset()
                 current = 0
-        if counter.total > last_total:      # a new istighfar was committed
+
+        if counter.total > last_total:
             last_change = time.time()
         last_total = counter.total
 
-        # ---------------- visual composition (single PIL conversion + cached fonts)
-        warm = max(0, 1.0 - (time.time() - last_change) / 1.6)
-        glow = (48, 120, 235) if warm > 0 else (80, 90, 105)
+        warm = max(0.0, 1.0 - (time.time() - last_change) / 1.4)
+        glow = WARM_ON if warm > 0 else WARM_OFF
 
+        # ── goal check ────────────────────────────────────────
         if not goal_celebrated and counter.total >= GOAL:
             goal_celebrated = True
             print(ar(f"🎉 أتممتَ {GOAL} تسبيحة — جزاك الله خيراً!"))
 
-        # goal progress bar (toward --goal, default 100)
         pct = min(counter.total / GOAL, 1.0)
-        bar_col = (40, 200, 120) if pct >= 1.0 else glow
-        cv2.rectangle(frame, (24, 108), (616, 124), (60, 70, 85), 2)
-        cv2.rectangle(frame, (26, 110), (26 + int(588 * pct), 122), bar_col, -1)
 
+        # ── overlay (dark tint) ───────────────────────────────
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (0, 0), (w, 105), BG, -1)
+        cv2.addWeighted(overlay, 0.85, frame, 0.15, 0, frame)
+
+        # ── top panel ─────────────────────────────────────────
         pil = begin_layer(frame)
-        pil = layer_text(pil, 24, 14, "مِسباح — عداد تسبيح بقبضة اليد", 40, (245, 245, 245))
-        pil = layer_text(pil, 24, 64, "افتح يدك ثم اقبضها: كل قبضة = تسبيحة", 20, (190, 210, 230))
-        pil = layer_text(pil, 30, 128, "إجمالي التسبيحات", 26, (210, 220, 230))
-        pil = layer_text(pil, 470, 128, f"متبقي في الحلقة: {33 - counter.total % 33}", 22, (200, 210, 235))
-        pil = layer_text(pil, 316, 96, f"الهدف {counter.total}/{GOAL}", 16,
-                         (150, 255, 180) if pct >= 1.0 else (230, 235, 240))
-        if pct >= 1.0 and warm > 0:
-            pil = layer_text(pil, 180, 60, "استغفر الله العظيم ✨", 20, (245, 230, 120))
+        pil = layer_text(pil, 24, 12, "مِسباح", 32, ACCENT)
+        pil = layer_text(pil, 110, 16, "عداد تسبيح بقبضة اليد", 22, TEXT_M)
+        pil = layer_text(pil, 24, 62, "افتح يدك ثم اقبضها — كل قبضة = تسبيحة", 16, TEXT_L)
         frame = end_layer(pil)
 
-        cv2.putText(frame, str(counter.total), (250, 150), cv2.FONT_HERSHEY_DUPLEX, 2.4, glow, 8)
-        frame = draw_gauge(frame, 555, 330, counter.total, glow)
+        # ── progress bar ──────────────────────────────────────
+        bar_color = GREEN_OK if pct >= 1.0 else ACCENT
+        draw_bar(frame, 24, 92, w - 48, 6, pct, bar_color)
 
-        # ---------------- SHAP explanation strip (fist state?)
+        # ── main count ────────────────────────────────────────
+        count_color = GREEN_OK if pct >= 1.0 else glow
+        cv2.putText(frame, str(counter.total), (30, 190),
+                    cv2.FONT_HERSHEY_DUPLEX, 3.0, count_color, 5, cv2.LINE_AA)
+
+        pil = begin_layer(frame)
+        pil = layer_text(pil, 30, 200, "تسبيحة", 18, TEXT_M)
+        frame = end_layer(pil)
+
+        # ── goal label ────────────────────────────────────────
+        goal_col = GREEN_OK if pct >= 1.0 else TEXT_M
+        pil = begin_layer(frame)
+        pil = layer_text(pil, 170, 200, f"الهدف {counter.total} / {GOAL}", 16, goal_col)
+        if pct >= 1.0 and warm > 0:
+            pil = layer_text(pil, 160, 230, "استغفر الله العظيم", 18, GOLD)
+        frame = end_layer(pil)
+
+        # ── tasbih gauge (left panel) ─────────────────────────
+        draw_gauge(frame, 130, 340, counter.total, glow)
+        pil = begin_layer(frame)
+        pil = layer_text(pil, 86, 280, f"حلقة {counter.total % 33} / 33", 14, TEXT_L)
+        frame = end_layer(pil)
+
+        # ── fist state indicator ──────────────────────────────
+        fist_col = ACCENT if current == 0 else TEXT_L
+        fist_text = "● قبضة" if current == 0 else "○ مفتوحة"
+        pil = begin_layer(frame)
+        pil = layer_text(pil, 30, 270, fist_text, 16, fist_col)
+        frame = end_layer(pil)
+
+        # ── SHAP explanation ──────────────────────────────────
         if has_hand:
             sv = core.explain_count(explainer, feats)
-            y0 = 440
-            state_word = "قبضة ✓" if current == 0 else f"مفتوحة ({current})"
+            bar_w = 140
+            bar_h = 24
+            gap = 10
+            x0 = 280
+            y0 = 260
+
             pil = begin_layer(frame)
-            pil = layer_text(pil, 24, y0 - 34, f"حالة اليد: {state_word}  (SHAP)", 22, (150, 235, 170))
-            width = 172
+            pil = layer_text(pil, x0, y0 - 26, "تحليل الشكل اليدوي  (SHAP)", 16, ACCENT)
+            frame = end_layer(pil)
+
             maxc = max(abs(v) for v in sv.values()) or 1e-6
             for i, name in enumerate(core.FINGER_NAMES):
                 v = sv[name]
-                bx = 24 + i * (width + 8)
-                bw = int(width / 2 * abs(v) / maxc)
+                by = y0 + i * (bar_h + gap)
+                # label
+                pil = begin_layer(frame)
+                pil = layer_text(pil, x0, by + 3, AR_NAMES[i], 13, TEXT_M)
+                frame = end_layer(pil)
+                # bar
+                bx0 = x0 + 100
+                bw = int((bar_w / 2) * abs(v) / maxc)
+                col = SHAP_POS if v >= 0 else SHAP_NEG
+                cv2.rectangle(frame, (bx0, by), (bx0 + bar_w, by + bar_h),
+                              BAR_BG, -1)
                 if v >= 0:
-                    cv2.rectangle(frame, (bx + width // 2, y0), (bx + width // 2 + bw, y0 + 30), BARO, -1)
+                    cv2.rectangle(frame, (bx0 + bar_w // 2, by + 2),
+                                  (bx0 + bar_w // 2 + bw, by + bar_h - 2), col, -1)
                 else:
-                    cv2.rectangle(frame, (bx, y0), (bx + width // 2 - bw, y0 + 30), BARFC, -1)
-                cv2.rectangle(frame, (bx, y0), (bx + width, y0 + 30), (120, 160, 200), 1)
-                pil = layer_text(pil, bx, y0 + 38, AR_NAMES[i], 16, (200, 210, 220))
-            pil = layer_text(pil, 24, y0 + 72, "أحمر=يزيد العدّ   أزرق=يُعوّق العدّ", 16, (170, 200, 210))
-            frame = end_layer(pil)
-            cv2.putText(frame, f"fist: {1 if current == 0 else 0}", (24, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, glow, 2)
+                    cv2.rectangle(frame, (bx0 + bar_w // 2 - bw, by + 2),
+                                  (bx0 + bar_w // 2, by + bar_h - 2), col, -1)
+                cv2.line(frame, (bx0 + bar_w // 2, by),
+                         (bx0 + bar_w // 2, by + bar_h), TEXT_L, 1, cv2.LINE_AA)
 
-            session_rows.append([dt.datetime.now().isoformat(), current] +
-                                [round(sv[n], 4) for n in core.FINGER_NAMES])
-        # ---------------- footer + keys
+            pil = begin_layer(frame)
+            pil = layer_text(pil, x0, y0 + 5 * (bar_h + gap) + 6,
+                             "   يزّيد العدّ      يُعوّق العدّ", 12, TEXT_L)
+            frame = end_layer(pil)
+
+            session_rows.append(
+                [dt.datetime.now().isoformat(), current] +
+                [round(sv[n], 4) for n in core.FINGER_NAMES])
+
+        # ── footer ────────────────────────────────────────────
         pil = begin_layer(frame)
-        pil = layer_text(pil, 190, 578, "R تصفير  ·  S حفظ  ·  Q خروج", 18, (120, 150, 170))
+        pil = layer_text(pil, 24, h - 36, "R تصفير  ·  S حفظ  ·  Q خروج", 13, TEXT_L)
         frame = end_layer(pil)
 
         cv2.imshow("MESBAHI — مِسباح", frame)
@@ -224,7 +281,6 @@ def main() -> None:
             break
         if key == ord("r"):
             counter.reset()
-            current = 0
             goal_celebrated = False
         if key == ord("s"):
             threading.Thread(target=save_csv, daemon=True).start()
@@ -233,7 +289,6 @@ def main() -> None:
     hands.close()
     cv2.destroyAllWindows()
     print(ar(f"جلسة انتهت — إجمالي: {counter.total} تسبيحة"))
-
 
 if __name__ == "__main__":
     main()
