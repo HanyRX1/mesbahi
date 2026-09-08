@@ -1,4 +1,4 @@
-"""MESBAHI — عداد استغفار ذكي من الكاميرا مع شرح قابل للتفسير (XAI).
+"""MESBAHI — عداد تسبيح ذكي من الكاميرا (قبضة اليد) مع شرح قابل للتفسير (XAI).
 
 Live demo:
     python main.py                  # use your webcam
@@ -84,9 +84,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="MESBAHI — camera istighfar counter with XAI")
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--simulate", action="store_true", help="scripted hand, no camera")
+    ap.add_argument("--goal", type=int, default=100, help="target istighfar (default 100)")
     args = ap.parse_args()
+    GOAL = args.goal
 
     model, explainer = core.build_count_model()
+    open_th, close_th = core.count_thresholds()
+    counter = core.FistCounter(open_th, close_th, hold_frames=3,
+                               alpha=0.6, fist_hold=4)
     hands = mp.solutions.hands.Hands(
         static_image_mode=False, max_num_hands=1,
         min_detection_confidence=0.5, min_tracking_confidence=0.5)
@@ -95,8 +100,10 @@ def main() -> None:
     cap = cv2.VideoCapture(args.camera) if not sim else None
     sim_t0 = time.time()
 
-    total, current = 0, 0
-    prev_open, last_change = 0, time.time()
+    current = 0
+    last_change, last_total = time.time(), 0
+    lost_frames = 0
+    goal_celebrated = False
     session_rows, started = [], dt.datetime.now()
     mask_seq = [0, 1, 2, 3, 4, 5, 4, 3, 2, 1, 0]
     seq_i = 0
@@ -140,38 +147,54 @@ def main() -> None:
             else:
                 feats = None
 
-        # ---------------- count logic: a NEW open finger = one istighfar
+        # ---------------- count logic: accurate per-finger state machine
         if has_hand:
-            current, raw = core.count_with_stable_finger(model, feats, prev_open)
-            if current != prev_open:
-                if current > prev_open:
-                    total += current - prev_open
-                last_change = time.time()
-                prev_open = current
+            lost_frames = 0
+            current = counter.update(feats)
         else:
-            prev_open = 0                       # drop the hand -> start fresh
+            lost_frames += 1
+            if lost_frames >= 5:            # hand gone ~0.5s -> full reset
+                counter.reset()
+                current = 0
+        if counter.total > last_total:      # a new istighfar was committed
+            last_change = time.time()
+        last_total = counter.total
 
         # ---------------- visual composition (single PIL conversion + cached fonts)
         warm = max(0, 1.0 - (time.time() - last_change) / 1.6)
         glow = (48, 120, 235) if warm > 0 else (80, 90, 105)
 
-        pil = begin_layer(frame)
-        pil = layer_text(pil, 24, 14, "مِسباح — عداد استغفار ذكي", 40, (245, 245, 245))
-        pil = layer_text(pil, 24, 64, "افتح إصبعاً من أصابعك: كل إصبع = استغفار", 20, (190, 210, 230))
-        pil = layer_text(pil, 30, 128, "إجمالي الاستغفار", 26, (210, 220, 230))
-        pil = layer_text(pil, 470, 128, f"متبقي في الحلقة: {33 - total % 33}", 22, (200, 210, 235))
+        if not goal_celebrated and counter.total >= GOAL:
+            goal_celebrated = True
+            print(ar(f"🎉 أتممتَ {GOAL} تسبيحة — جزاك الله خيراً!"))
 
+        # goal progress bar (toward --goal, default 100)
+        pct = min(counter.total / GOAL, 1.0)
+        bar_col = (40, 200, 120) if pct >= 1.0 else glow
+        cv2.rectangle(frame, (24, 108), (616, 124), (60, 70, 85), 2)
+        cv2.rectangle(frame, (26, 110), (26 + int(588 * pct), 122), bar_col, -1)
+
+        pil = begin_layer(frame)
+        pil = layer_text(pil, 24, 14, "مِسباح — عداد تسبيح بقبضة اليد", 40, (245, 245, 245))
+        pil = layer_text(pil, 24, 64, "افتح يدك ثم اقبضها: كل قبضة = تسبيحة", 20, (190, 210, 230))
+        pil = layer_text(pil, 30, 128, "إجمالي التسبيحات", 26, (210, 220, 230))
+        pil = layer_text(pil, 470, 128, f"متبقي في الحلقة: {33 - counter.total % 33}", 22, (200, 210, 235))
+        pil = layer_text(pil, 316, 96, f"الهدف {counter.total}/{GOAL}", 16,
+                         (150, 255, 180) if pct >= 1.0 else (230, 235, 240))
+        if pct >= 1.0 and warm > 0:
+            pil = layer_text(pil, 180, 60, "استغفر الله العظيم ✨", 20, (245, 230, 120))
         frame = end_layer(pil)
 
-        cv2.putText(frame, str(total), (250, 150), cv2.FONT_HERSHEY_DUPLEX, 2.4, glow, 8)
-        frame = draw_gauge(frame, 555, 330, total, glow)
+        cv2.putText(frame, str(counter.total), (250, 150), cv2.FONT_HERSHEY_DUPLEX, 2.4, glow, 8)
+        frame = draw_gauge(frame, 555, 330, counter.total, glow)
 
-        # ---------------- SHAP explanation strip (why n?)
+        # ---------------- SHAP explanation strip (fist state?)
         if has_hand:
             sv = core.explain_count(explainer, feats)
             y0 = 440
+            state_word = "قبضة ✓" if current == 0 else f"مفتوحة ({current})"
             pil = begin_layer(frame)
-            pil = layer_text(pil, 24, y0 - 34, f"لماذا عُدّ {current}؟  (SHAP)", 22, (150, 235, 170))
+            pil = layer_text(pil, 24, y0 - 34, f"حالة اليد: {state_word}  (SHAP)", 22, (150, 235, 170))
             width = 172
             maxc = max(abs(v) for v in sv.values()) or 1e-6
             for i, name in enumerate(core.FINGER_NAMES):
@@ -186,7 +209,7 @@ def main() -> None:
                 pil = layer_text(pil, bx, y0 + 38, AR_NAMES[i], 16, (200, 210, 220))
             pil = layer_text(pil, 24, y0 + 72, "أحمر=يزيد العدّ   أزرق=يُعوّق العدّ", 16, (170, 200, 210))
             frame = end_layer(pil)
-            cv2.putText(frame, f"open: {current}", (24, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, glow, 2)
+            cv2.putText(frame, f"fist: {1 if current == 0 else 0}", (24, 150), cv2.FONT_HERSHEY_SIMPLEX, 0.7, glow, 2)
 
             session_rows.append([dt.datetime.now().isoformat(), current] +
                                 [round(sv[n], 4) for n in core.FINGER_NAMES])
@@ -200,14 +223,16 @@ def main() -> None:
         if key in (113, 27):
             break
         if key == ord("r"):
-            total, current, prev_open = 0, 0, 0
+            counter.reset()
+            current = 0
+            goal_celebrated = False
         if key == ord("s"):
             threading.Thread(target=save_csv, daemon=True).start()
 
     cap.release() if cap else None
     hands.close()
     cv2.destroyAllWindows()
-    print(ar(f"جلسة انتهت — إجمالي: {total} استغفار"))
+    print(ar(f"جلسة انتهت — إجمالي: {counter.total} تسبيحة"))
 
 
 if __name__ == "__main__":

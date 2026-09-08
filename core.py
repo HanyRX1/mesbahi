@@ -96,6 +96,129 @@ def count_with_stable_finger(model, feats: np.ndarray, prev: float) -> tuple[int
     return max(0, min(5, int(round(prev)))), prev
 
 
+# ------------------------------------------------------------------- counting
+def count_thresholds(seed: int = 42) -> tuple[np.ndarray, np.ndarray]:
+    """Data-driven per-finger open/close thresholds with a hysteresis band.
+
+    Derived from the exact same synthetic score distribution used to train the
+    model, so each finger's thresholds sit between its 'open' and 'closed'
+    score clusters (thumb has a higher baseline than the other fingers).
+    Returns (open_th, close_th), each shape (5,).
+    """
+    rng = np.random.default_rng(seed)
+    acc_open = np.zeros(5)
+    acc_closed = np.zeros(5)
+    n_open = np.zeros(5, int)
+    n_closed = np.zeros(5, int)
+    for mask in range(32):
+        open_by_finger = np.array([int(bool(mask >> i & 1)) for i in range(5)])
+        for s in range(80):
+            feats = finger_features(synthetic_hand(mask, seed=s)) + rng.normal(0, 0.04, 5)
+            acc_open += feats * open_by_finger
+            acc_closed += feats * (1 - open_by_finger)
+            n_open += open_by_finger
+            n_closed += (1 - open_by_finger)
+    mean_open = acc_open / np.maximum(n_open, 1)
+    mean_closed = acc_closed / np.maximum(n_closed, 1)
+    span = mean_open - mean_closed
+    open_th = mean_closed + 0.55 * span    # finger must clearly rise to open
+    close_th = mean_closed + 0.30 * span   # once open, stays open lower — band
+    return open_th, close_th
+
+
+class FingerCounter:
+    """Accurate real-time istighfar counter (per-finger state machine).
+
+    Rules that kill the common false-count sources in opencv pipelines:
+      * Hysteresis band: a finger opens only past ``open_th`` and only closes
+        below ``close_th`` (open_th > close_th), so boundary jitter cannot
+        toggle it.
+      * Debounce: a change only commits after it persists ``hold_frames``
+        consecutive frames, so threshold flicker never becomes a count.
+      * One count per opening event: close & re-open counts again — exactly
+        'each fresh finger = one istighfar'.
+
+    Smoothing (EMA) additionally absorbs MediaPipe landmark jitter.
+    """
+
+    def __init__(self, open_th, close_th, hold_frames: int = 3, alpha: float = 0.6):
+        self.open_th = np.asarray(open_th, float)
+        self.close_th = np.asarray(close_th, float)
+        self.hold = max(1, int(hold_frames))
+        self.alpha = alpha
+        self.smooth = np.zeros(5, float)
+        self.state = np.zeros(5, bool)
+        self.streak = np.zeros(5, int)
+        self.total = 0
+
+    def reset(self) -> None:
+        self.smooth[:] = 0.0
+        self.state[:] = False
+        self.streak[:] = 0
+        self.total = 0
+
+    def update(self, feats) -> int:
+        """Feed one openness vector; returns current open-finger count."""
+        x = self.smooth = (self.alpha * np.asarray(feats, float)
+                           + (1 - self.alpha) * self.smooth)
+        rising = (x >= self.open_th) & ~self.state
+        falling = (x < self.close_th) & self.state
+        self.streak = np.where(rising | falling, self.streak + 1, 0)
+        opened = rising & (self.streak >= self.hold)
+        closed = falling & (self.streak >= self.hold)
+        self.total += int(opened.sum())
+        self.state[opened] = True
+        self.state[closed] = False
+        self.streak[opened | closed] = 0
+        return int(self.state.sum())
+
+
+class FistCounter:
+    """Count istighfar per completed fist-grip:  open hand → firm fist = +1.
+
+    Uses the noise-robust per-finger machine internally, then adds a
+    gesture-level debounce:
+
+      * opening the hand (any finger confirmed open) *arms* the counter;
+      * only a fully closed hand (a real fist), stable for ``fist_hold``
+        consecutive frames, commits exactly ONE istighfar;
+      * while the fist is held it never re-counts; opening again re-arms it.
+
+    This directly maps the user gesture — *one closed fist = one tasbih* —
+    and cannot produce spurious counts from jitter, partial grips or holds.
+    """
+
+    def __init__(self, open_th, close_th, hold_frames: int = 3,
+                 alpha: float = 0.6, fist_hold: int = 4):
+        self.fingers = FingerCounter(open_th, close_th, hold_frames, alpha)
+        self.fist_hold = max(1, int(fist_hold))
+        self.armed = False
+        self.fist_frames = 0
+        self.committed = False
+        self.total = 0
+
+    def reset(self) -> None:
+        self.fingers.reset()
+        self.armed = False
+        self.fist_frames = 0
+        self.committed = False
+        self.total = 0
+
+    def update(self, feats) -> int:
+        """Feed one openness vector; returns open-finger count (0 = fist)."""
+        n = self.fingers.update(feats)
+        if n > 0:                       # hand open → arm the counter
+            self.armed = True
+            self.fist_frames = 0
+            self.committed = False
+        elif self.armed:                # hand closing …
+            self.fist_frames += 1
+            if self.fist_frames >= self.fist_hold and not self.committed:
+                self.total += 1          # … and now a stable fist = one istighfar
+                self.committed = True
+        return n
+
+
 # ----------------------------------------------------------------- synthesis
 def synthetic_hand(open_mask: int, seed: int = 1) -> np.ndarray:
     """Build a plausible 21-landmark hand with the given fingers open (tests/sim).

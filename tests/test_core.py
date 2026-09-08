@@ -10,6 +10,30 @@ def model_and_explainer():
     return m, e
 
 
+@pytest.fixture(scope="module")
+def thresholds():
+    return core.count_thresholds()
+
+
+def make_counter(thresholds, **kw):
+    open_th, close_th = thresholds
+    return core.FistCounter(open_th, close_th, hold_frames=3, alpha=0.6, **kw)
+
+
+def feats_by_mask(mask):
+    return core.finger_features(core.synthetic_hand(mask, seed=3))
+
+
+def open_all(c):
+    for _ in range(5):
+        c.update(feats_by_mask(31))
+
+
+def close_all(c):
+    for _ in range(8):
+        c.update(feats_by_mask(0))
+
+
 @pytest.mark.parametrize(
     "mask,expected",
     [(0, 0), (1, 1), (2, 1), (4, 1), (8, 1), (16, 1),
@@ -60,3 +84,59 @@ def test_hysteresis_stable(model_and_explainer):
     f3 = core.finger_features(core.synthetic_hand(3))
     n3, _ = core.count_with_stable_finger(m, f3, prev=0)
     assert n3 == 2
+
+
+# -------------------------------------------------------------------- FistCounter
+def test_fist_counts_open_then_grip(thresholds):
+    c = make_counter(thresholds)
+    assert c.update(feats_by_mask(0)) == 0   # starts as fist
+    open_all(c)
+    assert c.armed
+    close_all(c)
+    assert c.total == 1                       # one grip = one istighfar
+
+
+def test_fist_never_recounts_while_held(thresholds):
+    c = make_counter(thresholds)
+    open_all(c)
+    close_all(c)
+    assert c.total == 1
+    for _ in range(50):                       # hold the fist forever
+        c.update(feats_by_mask(0))
+        assert c.total == 1
+
+
+def test_fist_reopen_counts_again(thresholds):
+    c = make_counter(thresholds)
+    open_all(c); close_all(c)
+    open_all(c); close_all(c)
+    open_all(c); close_all(c)
+    assert c.total == 3                       # repeat cycle -> 3 tasbih
+
+
+def test_partial_grip_does_not_count(thresholds):
+    c = make_counter(thresholds)
+    open_all(c)
+    # close only to 2 fingers and hold forever: not a fist
+    for _ in range(30):
+        c.update(feats_by_mask(3))
+    assert c.total == 0
+
+
+def test_fist_ignores_jitter_in_band(thresholds):
+    c = make_counter(thresholds)
+    open_th, close_th = thresholds
+    mid = (open_th + close_th) / 2
+    rng = np.random.default_rng(0)
+    for _ in range(40):                       # fingers dangling mid-band
+        c.update(mid + rng.normal(0, 0.03, 5))
+    assert c.total == 0
+
+
+def test_fist_reset(thresholds):
+    c = make_counter(thresholds)
+    open_all(c); close_all(c)
+    c.reset()
+    assert c.total == 0
+    open_all(c); close_all(c)
+    assert c.total == 1
