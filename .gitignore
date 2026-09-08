@@ -5,3 +5,6 @@ mesbahi_*.csv
 .pytest_cache/
 .venv/
 venv/
+*.log
+dbg_*.txt
+.idea/
