@@ -89,6 +89,39 @@ def draw_bar(frame, x, y, w, h, pct, color):
                       color, -1)
     return frame
 
+
+def open_camera(idx: int, attempts: int = 5):
+    """Open the camera with a working-frame probe so we never hang.
+
+    DirectShow first (responsive on Windows), then the default backend;
+    the device is only accepted once it actually delivers a frame.
+    """
+    for _ in range(attempts):
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            if ok:
+                return cap
+        cap.release()
+        time.sleep(0.5)
+    for _ in range(attempts):                    # last resort: default backend
+        cap = cv2.VideoCapture(idx)
+        if cap.isOpened():
+            ok, _ = cap.read()
+            if ok:
+                return cap
+        cap.release()
+        time.sleep(0.5)
+    return None
+
+
+def _make_hands():
+    return mp.solutions.hands.Hands(
+        static_image_mode=False, max_num_hands=1,
+        min_detection_confidence=0.5, min_tracking_confidence=0.5)
+
 # ─── Main ────────────────────────────────────────────────────────
 def main():
     ap = argparse.ArgumentParser(description="MESBAHI fist istighfar counter")
@@ -102,22 +135,24 @@ def main():
     open_th, close_th = core.count_thresholds()
     counter = core.FistCounter(open_th, close_th, hold_frames=3,
                                alpha=0.6, fist_hold=4)
-    hands = mp.solutions.hands.Hands(
-        static_image_mode=False, max_num_hands=1,
-        min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
     sim = args.simulate
+    demo_auto = False
     cap = None
+    hands = None
     if not sim:
-        cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        if not cap.isOpened():            # fall back to default backend
-            cap = cv2.VideoCapture(args.camera)
+        cap = open_camera(args.camera)
+        if cap is None:
+            print(ar("⚠️ تعذّر فتح الكاميرا — تشغيل الوضع التجريبي تلقائياً"))
+            sim = True
+            demo_auto = True
+    if not sim:
+        hands = _make_hands()
     sim_t0 = time.time()
 
     last_change = time.time()
     last_total = 0
+    current = 0
     lost_frames = 0
     goal_celebrated = False
     session_rows, started = [], dt.datetime.now()
@@ -146,6 +181,10 @@ def main():
             frame = np.zeros((480, 640, 3), np.uint8)
             frame[:] = BG
             h, w = 480, 640
+            if demo_auto:
+                pil = begin_layer(frame)
+                pil = layer_text(pil, 160, 12, "وضع العرض التوضيحي — بدون كاميرا", 18, GOLD)
+                frame = end_layer(pil)
         else:
             ok, frame = cap.read()
             if not ok:
@@ -283,7 +322,9 @@ def main():
 
         cv2.imshow("MESBAHI — مِسباح", frame)
         key = cv2.waitKey(1) & 0xFF
-        if key in (113, 27):
+        win_name = "MESBAHI — مِسباح"
+        win_visible = cv2.getWindowProperty(win_name, cv2.WND_PROP_VISIBLE)
+        if key in (113, 27) or win_visible < 1:
             break
         if key == ord("r"):
             counter.reset()
@@ -292,7 +333,7 @@ def main():
             threading.Thread(target=save_csv, daemon=True).start()
 
     cap.release() if cap else None
-    hands.close()
+    hands.close() if hands else None
     cv2.destroyAllWindows()
     print(ar(f"جلسة انتهت — إجمالي: {counter.total} تسبيحة"))
 
