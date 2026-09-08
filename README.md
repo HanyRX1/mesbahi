@@ -82,3 +82,34 @@ mesbahi/
 
 `MediaPipe` · `OpenCV` · `scikit-learn (GradientBoosting)` · `SHAP` · `numpy` ·
 `Pillow` · `arabic-reshaper` · `python-bidi` — كلها مثبّتة بدقة في `requirements.txt`.
+
+## الرفع على GitHub (متطلب المشروع)
+
+**مرة واحدة** — أنشئ repo عاماً باسم `MESBAHI`:
+
+```bash
+gh repo create MESBAHI --public --source=. --push
+```
+
+أو يدوياً عبر PAT (يعمل دائماً):
+
+```bash
+# 1) أنشئ Token: GitHub → Settings → Developer settings →
+#    Personal access tokens → Tokens (classic) → Generate → فعّل scope (repo)
+
+# 2) اربط المستودع المحلي بالمستودع البعيد وارفع
+git remote add origin https://github.com/<your-username>/MESBAHI.git
+git push -u origin main
+
+# عند الطلب: أدخل اسم المستخدم، ثم الـ PAT ككلمة سر
+```
+
+> أنشئ الـ repo الفارغ الغير عام على GitHub أولاً (بدون وسم README — الموجود لدينا)
+> ثم نفّذ `git remote add origin ... && git push`.
+
+## الأسئلة المتوقعة في العرض (SHAP/XAI)
+
+- **لماذا SHAP؟** كونه TreeExplainer — لحظي وسريع ومناسب للنموذج الشجري (GradientBoosting).
+- **كيف نمنع العدّ الزائف؟** hysteresis + debounce إطارات متتالية + آلة حالة القبضة.
+- **ماذا لو اختفت اليد؟** يُمسح مسلك الإيماءة فقط ويبقى تقدّم التسبيح.
+- **ماذا لو فشلت الكاميرا؟** وضع تجريبي تلقائي يضمن استمرار العرض.
