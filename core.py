@@ -28,13 +28,19 @@ FINGERS = [  # (tip, pip, mcp) per finger: thumb->index->middle->ring->pinky
 FINGER_NAMES = ["thumb", "index", "middle", "ring", "pinky"]
 
 
-def finger_features(lm: np.ndarray) -> np.ndarray:
+def finger_features(lm: np.ndarray, aspect: float = 1.0) -> np.ndarray:
     """Map 21 landmarks (x,y,z normalized) to 5 scale-invariant 'openness' scores.
 
     A finger is increasingly 'open' as its tip-to-mcp length exceeds its
     pip-to-mcp length (non-thumb) / thumb separated from the index base.
+
+    `aspect` = width/height of the camera frame. MediaPipe normalizes x by the
+    image width and y by the height independently, so raw coordinates are only
+    metric-isotropic once x is corrected by the frame aspect ratio. This keeps
+    the features invariant to camera resolution (square 720p == 480p 4:3).
     """
-    pts = lm.astype(float)
+    pts = lm.astype(float).copy()
+    pts[:, 0] *= aspect               # make x and y share the same physical scale
     palm = float(np.linalg.norm(pts[0] - pts[9])) + 1e-6  # wrist->middle mcp
     feats = []
     for tip, pip, mcp in FINGERS:
