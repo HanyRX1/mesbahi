@@ -151,11 +151,12 @@ class FingerCounter:
         self.streak = np.zeros(5, int)
         self.total = 0
 
-    def reset(self) -> None:
+    def reset(self, keep_total: bool = False) -> None:
         self.smooth[:] = 0.0
         self.state[:] = False
         self.streak[:] = 0
-        self.total = 0
+        if not keep_total:
+            self.total = 0
 
     def update(self, feats) -> int:
         """Feed one openness vector; returns current open-finger count."""
@@ -197,12 +198,16 @@ class FistCounter:
         self.committed = False
         self.total = 0
 
-    def reset(self) -> None:
-        self.fingers.reset()
+    def reset(self, keep_total: bool = False) -> None:
+        """Full session reset. Use ``keep_total=True`` to clear only the
+        gesture state (armed/fist/committed) — losing the hand then never
+        erases the tasbih progress; only the R key fully re-zeroes."""
+        self.fingers.reset(keep_total=keep_total)
         self.armed = False
         self.fist_frames = 0
         self.committed = False
-        self.total = 0
+        if not keep_total:
+            self.total = 0
 
     def update(self, feats) -> int:
         """Feed one openness vector; returns open-finger count (0 = fist)."""

@@ -107,7 +107,13 @@ def main():
         min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
     sim = args.simulate
-    cap = cv2.VideoCapture(args.camera) if not sim else None
+    cap = None
+    if not sim:
+        cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        if not cap.isOpened():            # fall back to default backend
+            cap = cv2.VideoCapture(args.camera)
     sim_t0 = time.time()
 
     last_change = time.time()
@@ -162,8 +168,8 @@ def main():
         else:
             lost_frames += 1
             if lost_frames >= 5:
-                counter.reset()
-                current = 0
+                counter.reset(keep_total=True)   # clear gesture state only,
+                current = 0                      # keep tasbih progress
 
         if counter.total > last_total:
             last_change = time.time()

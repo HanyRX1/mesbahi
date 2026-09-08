@@ -140,3 +140,22 @@ def test_fist_reset(thresholds):
     assert c.total == 0
     open_all(c); close_all(c)
     assert c.total == 1
+
+
+def test_lost_hand_keeps_progress(thresholds):
+    c = make_counter(thresholds)
+    open_all(c); close_all(c)          # two tasbih done
+    open_all(c); close_all(c)
+    assert c.total == 2
+    c.reset(keep_total=True)           # hand vanishes ~0.5s
+    assert c.total == 2                # progress survives
+    open_all(c); close_all(c)          # and counting continues
+    assert c.total == 3
+
+
+def test_lost_hand_does_not_rearm(thresholds):
+    c = make_counter(thresholds)
+    open_all(c); close_all(c)
+    c.reset(keep_total=True)
+    close_all(c)                       # reappear as a fist must NOT count
+    assert c.total == 1
