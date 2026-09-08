@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.csv
+mesbahi_*.csv
+.pytest_cache/
+.venv/
+venv/
